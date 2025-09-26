@@ -1,0 +1,25 @@
+# Node modules
+node_modules/
+
+# Python files/folders
+python/
+
+# Test folders
+test/
+
+# Environment variables
+.env
+
+# Copies and temporary files
+index copy.js
+systemPrompt copy.txt
+prompt.txt
+promt.docx
+
+# Data files that are temp or can be regenerated
+products.txt
+products.csv
+
+products.json
+Copy.env.txt
+.vercel
