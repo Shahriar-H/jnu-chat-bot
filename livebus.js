@@ -51,28 +51,82 @@ try {
   console.error('Firebase Admin init failed:', e.message);
 }
 
-async function pushToTopic(topic, payload) {
+// Send a direct FCM push to every rider of the given bus (their stored device tokens).
+// The requester's own devices are excluded so they don't get a notification about their own ask.
+async function pushToBusRiders(busName, payload, excludeEmail) {
   if (!admin) return;
+  let riders;
   try {
-    await admin.messaging().send({
-      topic,
-      notification: {
-        title: payload.title,
-        body: payload.body,
-      },
-      data: {
-        type: 'bus_request',
-        reqId: payload.reqId,
-        busId: payload.busId,
-        busName: payload.busName,
-      },
-      android: {
-        priority: 'high',
-        notification: { priority: 'high', channelId: 'default' },
-      },
-    });
+    riders = await usersCol()
+      .find({ busIds: busName, notificationsEnabled: { $ne: false } })
+      .toArray();
   } catch (e) {
-    console.error('FCM send failed:', e.message);
+    console.error('pushToBusRiders query failed:', e.message);
+    return;
+  }
+
+  const tokens = [];
+  for (const rider of riders) {
+    if (excludeEmail && rider.email === excludeEmail) continue;
+    for (const t of rider.fcmTokens || []) {
+      if (typeof t === 'string' && t && !tokens.includes(t)) tokens.push(t);
+    }
+  }
+  if (!tokens.length) {
+    console.log('pushToBusRiders: no tokens for bus', busName);
+    return;
+  }
+
+  const message = {
+    tokens,
+    notification: {
+      title: payload.title,
+      body: payload.body,
+    },
+    data: {
+      type: 'bus_request',
+      reqId: payload.reqId,
+      busId: payload.busId,
+      busName: payload.busName,
+      requesterEmail: payload.requesterEmail || '',
+      requesterName: payload.requesterName || '',
+    },
+    android: {
+      priority: 'high',
+      notification: { priority: 'high', channelId: 'default' },
+    },
+  };
+
+  try {
+    const res = await admin.messaging().sendEachForMulticast(message);
+    console.log('FCM multicast:', res.successCount, 'ok /', res.failureCount, 'failed');
+    if (res.failureCount > 0) {
+      const dead = new Set();
+      res.responses.forEach((r, i) => {
+        const code = r.error?.code;
+        if (
+          r.error &&
+          (code === 'messaging/registration-token-not-registered' ||
+            code === 'messaging/invalid-registration-token')
+        ) {
+          dead.add(tokens[i]);
+        }
+      });
+      if (dead.size) await pruneTokens(dead);
+    }
+  } catch (e) {
+    console.error('FCM multicast failed:', e.message);
+  }
+}
+
+async function pruneTokens(deadTokens) {
+  try {
+    await usersCol().updateMany(
+      { fcmTokens: { $in: [...deadTokens] } },
+      { $pull: { fcmTokens: { $in: [...deadTokens] } } }
+    );
+  } catch (e) {
+    console.error('pruneTokens failed:', e.message);
   }
 }
 
@@ -117,6 +171,7 @@ async function getOrCreateUser(info) {
       department: '',
       session: '',
       busIds: [],
+      fcmTokens: [],
       notificationsEnabled: true,
       createdAt: new Date(),
     };
@@ -223,7 +278,25 @@ router.post('/users/me', authRequired, async (req, res) => {
   }
 });
 
-// ---- Ask "where is my bus?" and notify everyone on the bus via FCM topic ----
+// ---- Register/update this user's FCM device token(s) for direct push ----
+router.post('/users/me/token', authRequired, async (req, res) => {
+  try {
+    const { email } = req.user;
+    const fcmToken = typeof req.body?.fcmToken === 'string' ? req.body.fcmToken.trim() : '';
+    if (!fcmToken) return res.status(400).json({ error: 'Missing fcmToken' });
+
+    const user = await usersCol().findOne({ email });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const current = Array.isArray(user.fcmTokens) ? user.fcmTokens : [];
+    const next = [fcmToken, ...current.filter((t) => t !== fcmToken)].slice(0, 5);
+    await usersCol().updateOne({ email }, { $set: { fcmTokens: next, updatedAt: new Date() } });
+
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 router.post('/bus/ask', authRequired, async (req, res) => {
   try {
     const { email, name } = req.user;
@@ -249,13 +322,15 @@ router.post('/bus/ask', authRequired, async (req, res) => {
     };
     await requestsCol().insertOne(doc);
 
-    await pushToTopic(busId, {
+    await pushToBusRiders(busName, {
       reqId,
       busId,
       busName,
+      requesterEmail: email,
+      requesterName: doc.requesterName,
       title: `${doc.requesterName} is asking about ${busName} bus`,
       body: 'Tap to help by sharing your location or where the bus is now.',
-    });
+    }, email);
 
     res.json({ reqId });
   } catch (e) {
@@ -334,6 +409,7 @@ router.get('/bus/requests/active', authRequired, async (req, res) => {
     const requests = await Promise.all(
       docs.map(async (d) => {
         const responded = await responsesCol().countDocuments({ reqId: d.reqId });
+        const respondedByMe = await responsesCol().countDocuments({ reqId: d.reqId, email: req.user.email });
         return {
           reqId: d.reqId,
           busId: d.busId,
@@ -346,6 +422,7 @@ router.get('/bus/requests/active', authRequired, async (req, res) => {
           createdAt: d.createdAt,
           expiresAt: d.expiresAt,
           responded,
+          respondedByMe: respondedByMe > 0,
         };
       })
     );
