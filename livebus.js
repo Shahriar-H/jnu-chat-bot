@@ -13,6 +13,9 @@ const usersCol = () => mongoose.connection.collection('users');
 const requestsCol = () => mongoose.connection.collection('requests');
 const responsesCol = () => mongoose.connection.collection('responses');
 const checkinsCol = () => mongoose.connection.collection('checkins');
+const busesCol = () => mongoose.connection.collection('buses');
+
+const BUS_DATA_URL = 'https://shahriar-h.github.io/jnu-bus-app-ads/data2.json';
 
 const SECRET = process.env.JWT_SECRET || 'mysecretkey';
 
@@ -144,6 +147,43 @@ function authRequired(req, res, next) {
   }
 }
 
+// Does this user have the bus (by name) in their profile's busIds?
+function isBusMember(user, busName) {
+  if (!user || !busName) return false;
+  return Array.isArray(user.busIds) && user.busIds.includes(busName);
+}
+
+// Convert a busId slug ("bus_<encodedName>") back to the display name
+function busNameFromId(busId) {
+  if (!busId || !String(busId).startsWith('bus_')) return String(busId || '');
+  try {
+    return decodeURIComponent(String(busId).slice(4));
+  } catch (e) {
+    return String(busId).slice(4);
+  }
+}
+
+// ---- Bus list stored in DB, fetched by the app ----
+router.get('/buses', async (req, res) => {
+  try {
+    let buses = await busesCol().find({}).sort({ order: 1 }).toArray();
+    if (!buses.length) {
+      const { data } = await axios.get(BUS_DATA_URL, { timeout: 15000 });
+      const list = data?.data || [];
+      if (list.length) {
+        const docs = list.map((b, i) => ({ ...b, order: i, updatedAt: new Date() }));
+        await busesCol().deleteMany({});
+        await busesCol().insertMany(docs);
+        buses = docs;
+      }
+    }
+    res.json({ data: buses.map(({ _id, ...b }) => b) });
+  } catch (e) {
+    console.error('/buses error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---- Google sign-in -> backend JWT ----
 router.post('/auth/google', async (req, res) => {
   try {
@@ -244,6 +284,9 @@ router.post('/bus/respond', authRequired, async (req, res) => {
     }
 
     const user = await usersCol().findOne({ email });
+    if (!isBusMember(user, request.busName)) {
+      return res.status(403).json({ error: 'Only riders of this bus can share its location' });
+    }
 
     const doc = {
       reqId,
@@ -276,6 +319,11 @@ router.get('/bus/requests/active', authRequired, async (req, res) => {
   try {
     const { busId } = req.query;
     if (!busId) return res.status(400).json({ error: 'Missing busId' });
+
+    const user = await usersCol().findOne({ email: req.user.email });
+    if (!isBusMember(user, busNameFromId(busId))) {
+      return res.json({ requests: [] });
+    }
 
     const docs = await requestsCol()
       .find({ busId, status: 'active', expiresAt: { $gt: new Date() } })
@@ -355,6 +403,10 @@ router.post('/bus/checkin', authRequired, async (req, res) => {
     }
 
     const user = await usersCol().findOne({ email });
+    if (!isBusMember(user, busNameFromId(busId))) {
+      return res.status(403).json({ error: 'Only riders of this bus can share its location' });
+    }
+
     const doc = {
       email,
       name: user?.name || name || email,
