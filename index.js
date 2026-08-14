@@ -4,8 +4,131 @@ const express = require('express');
 const axios = require('axios');
 require('dotenv').config(); // Load .env variables
 
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+
+const livebus = require("./livebus");
+
 const app = express();
 app.use(express.json()); // Replaces body-parser
+app.use(livebus); // Live bus location sharing endpoints
+
+
+// MongoDB connection
+mongoose.connect("mongodb+srv://wa-shaki:wa-shaki22@cluster1.o9bisql.mongodb.net/jnuapp_db")
+.then(() => console.log("MongoDB connected"))
+.catch(err => console.log(err));
+
+// Secret key for JWT
+const SECRET = "mysecretkey";
+
+/*
+  No models used — directly using collection
+*/
+const User = mongoose.connection.collection("users");
+
+
+// Register API
+app.post("/register", async (req, res) => {
+  try {
+    const data = req.body;
+
+    // Check if user exists
+    const existing = await User.findOne({ email:data?.email });
+    if (existing) {
+      console.log("User already exists");
+      
+      return res.json({ message: "User already exists" });
+    }
+
+    // Hash password
+    //const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Insert user
+    await User.insertOne(data);
+
+    res.json({ message: "User registered" });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// Login API
+app.post("/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Find user
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.json({ message: "User not found" });
+    }
+
+    // Compare password
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.json({ message: "Invalid password" });
+    }
+
+    // Create token
+    const token = jwt.sign({ id: user._id }, SECRET, {
+      expiresIn: "1h",
+    });
+
+    res.json({
+      message: "Login successful",
+      token,
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+//update user data
+app.post("/update-user", async (req, res) => {
+  try {
+    const { email, newData } = req.body;
+
+    // Find user
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.json({ message: "User not found" });
+    }
+
+    // Update user data
+    await User.updateOne({ email }, { $set: newData });
+
+    res.json({ message: "User data updated" });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// Test protected route
+app.get("/profile", async (req, res) => {
+  try {
+    const token = req.headers.authorization;
+
+    if (!token) {
+      return res.status(401).json({ message: "No token" });
+    }
+
+    const decoded = jwt.verify(token, SECRET);
+
+    const user = await User.findOne({ _id: new mongoose.Types.ObjectId(decoded.id) });
+
+    res.json({ user });
+
+  } catch (err) {
+    res.status(401).json({ message: "Invalid token" });
+  }
+});
 
 // Load system prompt
 const promptPath = path.resolve(__dirname, './Jnubus.txt');
