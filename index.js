@@ -9,10 +9,12 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
 const livebus = require("./livebus");
+const testPush = require("./testPush");
 
 const app = express();
 app.use(express.json()); // Replaces body-parser
 app.use(livebus); // Live bus location sharing endpoints
+app.use(testPush); // FCM push test UI
 
 
 // MongoDB connection

@@ -32,28 +32,12 @@ const GOOGLE_CLIENT_IDS = (
 const REQUEST_TTL_MS = 60 * 60 * 1000; // 60 minutes
 const CHECKIN_TTL_MS = 60 * 60 * 1000; // 60 minutes
 
-// ---- Firebase Admin (used only for FCM push) ----
-let admin = null;
-try {
-  const serviceAccountJson = process.env.FCM_SERVICE_ACCOUNT;
-  if (serviceAccountJson) {
-    admin = require('firebase-admin');
-    if (!admin.apps.length) {
-      admin.initializeApp({
-        credential: admin.credential.cert(JSON.parse(serviceAccountJson)),
-      });
-    }
-    console.log('Firebase Admin initialized for FCM push');
-  } else {
-    console.warn('FCM_SERVICE_ACCOUNT not set — bus request push notifications disabled');
-  }
-} catch (e) {
-  console.error('Firebase Admin init failed:', e.message);
-}
+const { getAdmin, getInitError } = require('./fcm');
 
 // Send a direct FCM push to every rider of the given bus (their stored device tokens).
 // The requester's own devices are excluded so they don't get a notification about their own ask.
 async function pushToBusRiders(busName, payload, excludeEmail) {
+  const admin = getAdmin();
   if (!admin) return;
   let riders;
   try {
@@ -304,6 +288,16 @@ router.post('/bus/ask', authRequired, async (req, res) => {
     if (!busId || !busName) return res.status(400).json({ error: 'Missing busId or busName' });
 
     const user = await usersCol().findOne({ email });
+
+    // Skip duplicates: if this requester already has an active request for this bus,
+    // reuse it and don't create a new one or push again.
+    const existing = await requestsCol().findOne({
+      busId,
+      requesterEmail: email,
+      status: 'active',
+      expiresAt: { $gt: new Date() },
+    });
+    if (existing) return res.json({ reqId: existing.reqId });
 
     const reqId = 'req_' + crypto.randomUUID();
     const now = new Date();
